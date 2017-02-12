@@ -1,50 +1,123 @@
-WRK_CMD=""
+#!/usr/bin/env bash
 
 set -xe
-
-envs=(python2 python3 pypy)
 
 # If already in a python venv, get out. 
 deactivate 2> /dev/null || true
 
-# Clean up any existing virutal envs
-find . -name venv | xargs rm -rf
-find . -name \*.log | xargs rm -rf
+log="$(pwd)/runs.log"
+echo -n > $log
 
-# For each python lib to be tested
-for lib in $(find python -type d -mindepth 1 -maxdepth 1); do
+# System stats.
+echo "|$|processor|$(grep "model name" /proc/cpuinfo | head -n 1)" >> $log
+echo "|$|processor_count|$(grep processor /proc/cpuinfo | wc -l)" >> $log
+echo "|$|memory|$(fee -h | grep mem)" >> $log
 
-    # `cd` in to each python lib directory
-    pushd $lib
-    for py in ${envs[@]}; do
-        # start a log file
-        log="$lib_$py.log"
-        echo -n > $log
+# Kill zombies that could be taking up port 8005.
+zombies=$(ps aux | grep python_falcon | grep gunicorn | grep -v grep | awk '{print $2}' | xargs)
+if [ ! -z "$zombies" ]; then
+    kill -9 $zombies
+fi
+zombies=$(ps aux | grep serv.py | grep -v grep | awk '{print $2}' | xargs)
+if [ ! -z "$zombies" ]; then
+    kill -9 $zombies
+fi
+zombies=$(ps aux | grep "/exe/main" | grep -v grep | awk '{print $2}' | xargs)
+if [ ! -z "$zombies" ]; then
+    kill -9 $zombies
+fi
 
-        # stash the Python version used
-        py_ver=$($py --version 2>&1)
-        echo "|$|PYTHON_VERSION|$py_ver" >> $log
+#
+# Python: Falcon
+#
 
-        # initialize a new venv
-        virtualenv -p "$(which $py)" venv
-        source venv/bin/activate
-        pip install --quiet -r requirements.txt
-        if [[ "$py" == "python2" || "$py" == "pypy" ]]; then
-            pip install futures
-        fi
+envs=(python2 pypy python3)
+pushd python_falcon
+rm -rf venv
+for py in ${envs[@]}; do
+    # initialize a new venv
+    virtualenv -p "$(which $py)" venv
+    source venv/bin/activate
+    pip install --quiet -r requirements.txt
+    if [[ "$py" == "python2" || "$py" == "pypy" ]]; then
+        pip install futures
+    fi
 
-        # start a gunicorn server
-        gunicorn \
-            --threads 4 \
-            --bind 0.0.0.0:8005 \
-            serv:app &
-        sleep 3
+    # start a gunicorn server
+    gunicorn \
+        --threads 4 \
+        --bind 0.0.0.0:8005 \
+        serv:app &
+    sleep 3
 
-        # get some `wrk` load testing stats
-        cmd="wrk -d 10s -c 300 -t 8 --latency http://localhost:8005 | tee -a $log"
-        echo "|$|WRK:gunicorn|$cmd"
-        $cmd
-        kill %1
-    done
-    popd
+    # get some `wrk` load testing stats
+    # stash the Python version used
+    py_ver=$($py --version 2>&1)
+    echo "|$|WRK|$py:falcon|$WRK_CMD" >> $log
+    wrk -c 400 -t 8 -d 10s --latency http://localhost:8005 2>&1 | tee -a $log
+    zombies=$(ps aux | grep python_falcon | grep gunicorn | grep -v grep | awk '{print $2}' | xargs)
+    if [ ! -z "$zombies" ]; then
+        kill -9 $zombies
+    fi
 done
+popd
+
+#
+# Python: aiohttp
+#
+
+envs=(python3)
+pushd python_aiohttp
+rm -rf venv
+for py in ${envs[@]}; do
+    # initialize a new venv
+    virtualenv -p "$(which $py)" venv
+    source venv/bin/activate
+    pip install --quiet -r requirements.txt
+
+    python serv.py &
+    sleep 3
+
+    # get some `wrk` load testing stats
+    # stash the Python version used
+    py_ver=$($py --version 2>&1)
+    echo "|$|WRK|$py:aiohttp|$WRK_CMD" >> $log
+    wrk -c 400 -t 8 -d 10s --latency http://localhost:8005 2>&1 | tee -a $log
+    zombies=$(ps aux | grep serv.py | grep -v grep | awk '{print $2}' | xargs)
+    if [ ! -z "$zombies" ]; then
+        kill -9 $zombies
+    fi
+done
+popd
+
+#
+# Go
+# 
+
+# Need to have Go installed
+pushd go
+export GOPATH=`pwd`
+go run src/serv/main.go &
+sleep 3
+echo "|$|WRK|go:$(go version)|$WRK_CMD" >> $log
+wrk -c 400 -t 8 -d 10s --latency http://localhost:8005 2>&1 | tee -a $log
+zombies=$(ps aux | grep "/exe/main" | grep -v grep | awk '{print $2}' | xargs)
+if [ ! -z "$zombies" ]; then
+    kill -9 $zombies
+fi
+popd
+
+#
+# Node
+#
+
+# Need to have node and npm installed
+pushd js
+rm -rf node_modules npm-debug.log
+npm install
+node serv.js &
+sleep 3
+echo "|$|WRK|node:$(node --version)|$WRK_CMD" >> $log
+wrk -c 400 -t 8 -d 10s --latency http://localhost:8005 2>&1 | tee -a $log
+kill %1
+popd
