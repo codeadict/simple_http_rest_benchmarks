@@ -26,6 +26,10 @@ zombies=$(ps aux | grep "/exe/main" | grep -v grep | awk '{print $2}' | xargs)
 if [ ! -z "$zombies" ]; then
     kill -9 $zombies
 fi
+zombies=$(ps aux | grep serv.js | grep -v grep | awk '{print $2}' | xargs)
+if [ ! -z "$zombies" ]; then
+    kill -9 $zombies
+fi
 
 #
 # Python: Falcon
@@ -119,5 +123,8 @@ node serv.js &
 sleep 3
 echo "|$|WRK|node:$(node --version)|$WRK_CMD" >> $log
 wrk -c 400 -t 8 -d 10s --latency http://localhost:8005 2>&1 | tee -a $log
-kill %1
+zombies=$(ps aux | grep serv.js | grep -v grep | awk '{print $2}' | xargs)
+if [ ! -z "$zombies" ]; then
+    kill -9 $zombies
+fi
 popd
